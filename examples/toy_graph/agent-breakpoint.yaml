@@ -1,0 +1,27 @@
+# A LangGraph workflow with a checkpointer and file memory; no model needed.
+entrypoint: examples.toy_graph.graph:run
+python_path: ["../.."]
+
+scenarios:
+  - name: refund
+    task: {prompt: "Refund order 42", inputs: {order_id: 42}}
+    invariants: [examples.toy_graph.invariants:paid_exactly_once]
+  - name: refund-idempotent
+    task: {prompt: "Refund order 42", inputs: {order_id: 42, idempotent: true}}
+    invariants: [examples.toy_graph.invariants:paid_exactly_once]
+  - name: episode
+    task: {prompt: "Refund order 42", inputs: {order_id: 42}}
+    later_tasks:
+      - {prompt: "What happened to my last order?"}
+    invariants:
+      - examples.toy_graph.invariants:paid_exactly_once
+      - examples.toy_graph.invariants:remembers_order
+
+compat:
+  ref: HEAD
+  check: examples.toy_graph.graph:compat_check
+
+budgets: {wall_clock_s: 60}
+tiers:
+  quick: {runs: 1, max_cells: 80, busiest: null}
+  full: {runs: 2, max_cells: 200, busiest: null, combinations: true}

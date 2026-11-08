@@ -1,0 +1,86 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --python 3.12
+      - run: uv run ruff check src tests examples
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --python ${{ matrix.python }}
+      - run: uv run pytest -q -p no:logging
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      - name: Smoke-test the wheel in a clean environment
+        run: |
+          uv venv /tmp/wheel-check
+          uv pip install --python /tmp/wheel-check/bin/python dist/*.whl
+          /tmp/wheel-check/bin/agent-breakpoint faults > /dev/null
+      - uses: actions/upload-artifact@v4
+        with: {name: dist, path: dist/}
+
+  dogfood:
+    # The repo's own Action against the bundled toy agent, which has known silent and unsafe
+    # cells: the gate must fail, or the harness has stopped finding them.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: |
+          pip install -e ".[all]"
+          nohup python -m examples.toy_bank.serve_llm 8765 > /tmp/llm.log 2>&1 &
+          echo "TOY_LLM_URL=http://127.0.0.1:8765" >> "$GITHUB_ENV"
+          echo "TOY_PYTHON=$(which python)" >> "$GITHUB_ENV"
+          echo "PYTHONPATH=$PWD" >> "$GITHUB_ENV"
+      - id: abk
+        uses: ./
+        continue-on-error: true
+        with:
+          config: examples/toy_bank/agent-breakpoint.yaml
+          upload-sarif: "false"
+          compare-to-main: "false"
+      - name: The toy agent must fail the gate
+        run: test "${{ steps.abk.outputs.passed }}" = "false"
+
+  # The single required status check for branch protection: green only if every job above is.
+  ci-passed:
+    if: always()
+    needs: [lint, test, build, dogfood]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All required jobs passed
+        run: |
+          echo '${{ toJSON(needs) }}'
+          test "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" = "false"

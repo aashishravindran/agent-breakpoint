@@ -1,0 +1,36 @@
+# Toy bank: a refund agent with one stdio MCP server. Used by the test suite and the README.
+entrypoint: examples.toy_bank.agent:run
+python_path: ["../.."]
+seed: 7
+
+env:
+  TOY_PYTHON: ${TOY_PYTHON}
+
+models:
+  - name: llm
+    provider: openai
+    upstream: ${TOY_LLM_URL}
+    env: [OPENAI_BASE_URL]
+    env_suffix: /v1
+
+mcp_config:
+  path: mcp.json
+  env: TOY_MCP_CONFIG
+
+scenarios:
+  - name: refund
+    task: {prompt: "Please refund order 42; the customer returned it."}
+    seed: examples.toy_bank.seed:seed
+    invariants:
+      - examples.toy_bank.invariants:exactly_one_refund
+      - examples.toy_bank.invariants:refund_amount_correct
+
+budgets: {max_usd: 1.0, max_model_calls: 30, wall_clock_s: 60}
+pricing: {input_per_mtok: 3, output_per_mtok: 15}
+
+tiers:
+  quick: {runs: 1, max_cells: 60, busiest: null, max_usd: 1.0}
+  full: {runs: 3, max_cells: 200, busiest: null, combinations: true}
+
+gate:
+  fail_on: [failed_silently, unsafe]

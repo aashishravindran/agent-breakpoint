@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "bank": {
+      "command": "$TOY_PYTHON",
+      "args": ["$TOY_DIR/mcp_server.py"]
+    }
+  }
+}

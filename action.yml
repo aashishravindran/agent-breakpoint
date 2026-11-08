@@ -1,0 +1,89 @@
+name: agent-breakpoint
+description: Break your agent's model, tools, dependencies and state on purpose; fail the build on silent or unsafe failures.
+branding: {icon: zap-off, color: red}
+
+inputs:
+  tier:
+    description: Tier to run (quick or full, or any tier in the config)
+    default: quick
+  config:
+    description: Path to agent-breakpoint.yaml
+    default: agent-breakpoint.yaml
+  scenario:
+    description: Scenario name (default the first)
+    default: ""
+  fail-on:
+    description: Comma-separated grades that fail the build
+    default: failed_silently,unsafe
+  python-version:
+    default: "3.12"
+  install:
+    description: Command that installs your agent's dependencies
+    default: ""
+  upload-sarif:
+    description: Upload findings to GitHub code scanning
+    default: "true"
+  compare-to-main:
+    description: Diff grades against the last run on the default branch
+    default: "true"
+
+outputs:
+  passed:
+    description: "true when no cell has a fail-on grade"
+    value: ${{ steps.run.outputs.passed }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with: {python-version: "${{ inputs.python-version }}"}
+    - shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        pip install "agent-breakpoint[all] @ ${{ github.action_path }}"
+        ${{ inputs.install }}
+    - name: Restore the default branch's matrix
+      if: inputs.compare-to-main == 'true' && github.ref_name != github.event.repository.default_branch
+      uses: actions/cache/restore@v4
+      with:
+        path: .agent-breakpoint-main/latest.json
+        key: agent-breakpoint-${{ github.event.repository.default_branch }}-${{ inputs.tier }}-
+        restore-keys: agent-breakpoint-${{ github.event.repository.default_branch }}-${{ inputs.tier }}-
+    - id: run
+      shell: bash
+      run: |
+        set +e
+        args=(-c "${{ inputs.config }}" run "${{ inputs.tier }}" --fail-on "${{ inputs.fail-on }}"
+              --sarif agent-breakpoint.sarif --junit agent-breakpoint.junit.xml
+              --markdown agent-breakpoint.md --json agent-breakpoint.json)
+        [ -n "${{ inputs.scenario }}" ] && args+=(--scenario "${{ inputs.scenario }}")
+        [ -f .agent-breakpoint-main/latest.json ] && args+=(--diff .agent-breakpoint-main/latest.json)
+        agent-breakpoint "${args[@]}"
+        code=$?
+        if [ -f .agent-breakpoint-main/latest.json ]; then
+          agent-breakpoint diff .agent-breakpoint-main/latest.json agent-breakpoint.json \
+            --markdown agent-breakpoint.diff.md || true
+        fi
+        cat agent-breakpoint.md >> "$GITHUB_STEP_SUMMARY"
+        [ -f agent-breakpoint.diff.md ] && { echo "### Changes vs default branch"; cat agent-breakpoint.diff.md; } >> "$GITHUB_STEP_SUMMARY"
+        echo "passed=$([ $code -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+        exit $code
+    - name: Save matrix for future comparisons
+      if: always() && github.ref_name == github.event.repository.default_branch
+      shell: bash
+      run: mkdir -p .agent-breakpoint-main && cp agent-breakpoint.json .agent-breakpoint-main/latest.json
+    - if: always() && github.ref_name == github.event.repository.default_branch
+      uses: actions/cache/save@v4
+      with:
+        path: .agent-breakpoint-main/latest.json
+        key: agent-breakpoint-${{ github.event.repository.default_branch }}-${{ inputs.tier }}-${{ github.run_id }}
+    - if: always() && inputs.upload-sarif == 'true'
+      uses: github/codeql-action/upload-sarif@v3
+      with: {sarif_file: agent-breakpoint.sarif, category: agent-breakpoint}
+    - if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: agent-breakpoint-${{ inputs.tier }}
+        path: |
+          agent-breakpoint.*
+          .agent-breakpoint/runs/
